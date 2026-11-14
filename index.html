@@ -50,7 +50,7 @@ h1{font-family:var(--f-display);font-weight:400;font-size:clamp(22px,4vw,30px);l
 .exit::before{content:"";position:absolute;top:-6px;left:4px;right:4px;height:6px;background:var(--asphalt-2)}
 .exit svg{width:22px;height:16px;animation:nudge 1.4s ease-in-out infinite}
 @keyframes nudge{50%{transform:translateY(3px)}}
-.veh{position:absolute;border:0;background:none;touch-action:none;cursor:grab;
+.veh{position:absolute;border:0;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent;background:none;touch-action:none;cursor:grab;
   transition:left .16s ease,top .16s ease;filter:drop-shadow(0 3px 3px rgba(0,0,0,.45))}
 .veh.dragging{transition:none;cursor:grabbing;z-index:5;filter:drop-shadow(0 8px 8px rgba(0,0,0,.5))}
 .veh svg{width:100%;height:100%;display:block}
@@ -260,6 +260,7 @@ function parse(lv){
   return lv.p.split(' ').map((s,i)=>({o:s[0],r:+s[1],c:+s[2],len:+s[3]}));
 }
 function loadLevel(sid,i){
+  drag=null;
   setId=sid; idx=Math.max(0,Math.min(SETS[sid].levels.length-1,i)); level=SETS[sid].levels[idx];
   N=level.n; P=parse(level); pos=P.map(p=>p.o==='H'?p.c:p.r);
   history=[]; hintsUsed=0; solved=false; sel=-1;
@@ -324,6 +325,7 @@ function commit(i,to){
   clearHint(); $('msg').textContent=''; place(i); renderPanel(); checkWin();
 }
 function undo(){
+  endDrag();
   if(solved||!history.length)return;
   const m=history.pop(); pos[m.i]=m.from; clearHint(); place(m.i); renderPanel();
 }
@@ -348,35 +350,55 @@ function checkWin(){
 }
 
 /* ---------- dragging ---------- */
+// One drag at a time, tracked by pointerId. Extra fingers are ignored, and every way a drag
+// can end (lift, cancel, window blur, level change) snaps the car to a whole cell.
 let drag=null;
+function axisCoord(i,e){return P[i].o==='H'?e.clientX:e.clientY}
+function endDrag(){
+  if(!drag)return;
+  const d=drag; drag=null;
+  const el=vehEls[d.i]; if(!el)return;
+  el.classList.remove('dragging');
+  try{ if(el.hasPointerCapture&&el.hasPointerCapture(d.pid)) el.releasePointerCapture(d.pid) }catch(_){}
+  // a drag of about a third of a cell is enough to move one cell
+  const steps=Math.sign(d.off)*Math.floor(Math.abs(d.off)+0.65);
+  const to=Math.max(d.lo,Math.min(d.hi,d.base+steps));
+  if(to!==pos[d.i]) commit(d.i,to); else place(d.i);
+}
 function onDown(e){
   if(solved)return;
-  const i=+e.currentTarget.dataset.i, p=P[i], el=vehEls[i];
+  if(e.pointerType==='mouse'&&e.button!==0)return;
+  if(drag)return;                       // a second finger while dragging: ignore it
+  const i=+e.currentTarget.dataset.i, el=vehEls[i];
   e.preventDefault(); el.focus({preventScroll:true}); sel=i; markSel();
   const [lo,hi]=bounds(i);
-  drag={i,lo,hi,start:p.o==='H'?e.clientX:e.clientY,cell:boardEl.getBoundingClientRect().width/N,base:pos[i],moved:false};
-  el.setPointerCapture(e.pointerId); el.classList.add('dragging');
-  el.addEventListener('pointermove',onMove); el.addEventListener('pointerup',onUp); el.addEventListener('pointercancel',onUp);
+  drag={i,lo,hi,pid:e.pointerId,start:axisCoord(i,e),cell:boardEl.getBoundingClientRect().width/N,base:pos[i],off:0};
+  try{el.setPointerCapture(e.pointerId)}catch(_){}
+  el.classList.add('dragging');
 }
 function onMove(e){
-  if(!drag)return;
-  const p=P[drag.i], cur=p.o==='H'?e.clientX:e.clientY;
-  let off=(cur-drag.start)/drag.cell;
-  off=Math.max(drag.lo-drag.base,Math.min(drag.hi-drag.base,off));
-  if(Math.abs(off)>.05)drag.moved=true;
-  const pct=100/N, v=(drag.base+off)*pct+'%';
-  if(p.o==='H')vehEls[drag.i].style.left=v; else vehEls[drag.i].style.top=v;
+  if(!drag||e.pointerId!==drag.pid)return;
+  e.preventDefault();
+  let off=(axisCoord(drag.i,e)-drag.start)/drag.cell;
+  drag.off=off=Math.max(drag.lo-drag.base,Math.min(drag.hi-drag.base,off));
+  const v=(drag.base+off)*100/N+'%';
+  if(P[drag.i].o==='H')vehEls[drag.i].style.left=v; else vehEls[drag.i].style.top=v;
 }
 function onUp(e){
-  if(!drag)return;
-  const el=vehEls[drag.i], p=P[drag.i], cur=p.o==='H'?e.clientX:e.clientY;
-  let off=(cur-drag.start)/drag.cell; off=Math.max(drag.lo-drag.base,Math.min(drag.hi-drag.base,off));
-  const to=drag.base+Math.round(off);
-  el.classList.remove('dragging');
-  el.removeEventListener('pointermove',onMove); el.removeEventListener('pointerup',onUp); el.removeEventListener('pointercancel',onUp);
-  const i=drag.i; drag=null;
-  if(to!==pos[i]) commit(i,to); else place(i);
+  if(!drag||e.pointerId!==drag.pid)return;
+  if(e.type==='pointerup'){ // use the lift position; a cancel keeps the last known position
+    const off=(axisCoord(drag.i,e)-drag.start)/drag.cell;
+    drag.off=Math.max(drag.lo-drag.base,Math.min(drag.hi-drag.base,off));
+  }
+  endDrag();
 }
+window.addEventListener('pointermove',onMove,{passive:false});
+window.addEventListener('pointerup',onUp);
+window.addEventListener('pointercancel',onUp);
+window.addEventListener('blur',endDrag);
+document.addEventListener('visibilitychange',()=>{if(document.hidden)endDrag()});
+boardEl.addEventListener('touchmove',e=>{if(drag)e.preventDefault()},{passive:false});
+boardEl.addEventListener('contextmenu',e=>e.preventDefault());
 function onKey(e){
   if(solved)return;
   const i=+e.currentTarget.dataset.i,p=P[i];
